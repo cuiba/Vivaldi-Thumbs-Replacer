@@ -16,6 +16,7 @@
 
 
 import os
+import time
 import shutil
 import json
 import sqlite3
@@ -31,20 +32,6 @@ customThumbs_path = "Path to directory with thumbnails"
 # --------------------------------------------------------------------------- #
 
 
-def load_speeddial(file_path):
-    """
-    Load the bookmark entries from Vivaldi's speed dial and return as
-    dictionary
-    """
-    # read bookmark file
-    with open(file_path, encoding="UTF-8") as jfile:
-        bookmarks = json.load(jfile)
-
-    # access speed dial
-    speeddial = bookmarks["roots"]["bookmark_bar"]["children"][0]["children"]
-    return {x["id"]: x["name"] for x in speeddial if x["type"] == "url"}
-
-
 def load_thumbs(dir_path):
     """
     Load custom thumbnails in specified directory and return as dictionary
@@ -54,40 +41,77 @@ def load_thumbs(dir_path):
             for x in [y.split("_") for y in thumbs]}
 
 
-def update_thumbs(topSites_path, bookmarks, thumbnails):
-    """
-    Replace thumbnails where thumbnail id matches bookmark id and print results
-    """
+def recurser(recurse_val,bookmark_dict,updated,not_found,thumbnails):
+    for val in recurse_val:
+        # if 'children' tag not present then it is not a folder
+        if not 'children' in val:
+            key=val['id']
+            bookmark_dict.update({key:val['name']})
+            '''
+                Replace thumbnails where thumbnail id matches bookmark id
+            '''
+            if key in thumbnails.keys():
+                with open(thumbnails[key], "rb") as bfile:
+                    pic = bfile.read()
+                up_time = str(int(time.time()))
+                sql = "INSERT OR REPLACE INTO thumbnails(thumbnail,url,url_rank,title,redirects,at_top,load_completed,last_updated,last_forced) VALUES(?,?,?,?,?,?,?,?,?)"
+                cur.execute(sql, (
+                    pic, "http://bookmark_thumbnail/" + str(key), '-1', '',
+                    'http://bookmark_thumbnail/' + str(key), '1', '1', up_time, up_time))
+                meta = {
+                    'Thumbnail': 'chrome://thumb/' + 'http://bookmark_thumbnail/' + str(key) + "?" + up_time}
+                val['meta_info'] = meta
+                conn.commit()
+                updated.append(key)
+            else:
+                not_found.append(key)
+
+        else:
+            # if it is a folder then recursing
+            if len(val['children'])!=0:
+                recurser(val['children'],bookmark_dict,updated,not_found,thumbnails)
+
+
+
+def update_thumbs(bookmark_path,topSites_path, thumbnails):
+
+    bookmark_dict={}
     updated = []
     not_found = []
 
+    global conn,cur
     # open database
     conn = sqlite3.connect(topSites_path)
     cur = conn.cursor()
 
-    # replace if match
-    for key in bookmarks.keys():
-        if key in thumbnails.keys():
-            with open(thumbnails[key], "rb") as bfile:
-                pic = bfile.read()
-            sql = "UPDATE thumbnails SET thumbnail=? WHERE url=?"
-            cur.execute(sql, (pic, "http://bookmark_thumbnail/" + str(key)))
-            conn.commit()
-            updated.append(key)
-        else:
-            not_found.append(key)
+    with open(bookmark_path, encoding="UTF-8") as jfile:
+        bookmarks = json.load(jfile)
+
+    # access bookmark entries
+    bookmarks_data = bookmarks["roots"]["bookmark_bar"]["children"]
+
+    # checking if bookmark content is an Active speeddial or not
+    for i in bookmarks_data:
+        if 'meta_info' in i:
+            if 'Speeddial' in i['meta_info']:
+                if i['meta_info']['Speeddial'] == 'true':
+                    recurser(i['children'],bookmark_dict,updated,not_found,thumbnails)
 
     conn.close()
+
+    # Writing changes to bookmarks file
+    with open(bookmark_path, 'w') as bmk:
+        json.dump(bookmarks, bmk)
 
     # print results
     if updated:
         print("\nUpdated:")
         for key in updated:
-            print("{}: {}".format(key, bookmarks[key]))
+            print("{}: {}".format(key, bookmark_dict[key]))
     if not_found:
         print("\nNot updated (no custom thumbnails found):")
         for key in not_found:
-            print("{}: {}".format(key, bookmarks[key]))
+            print("{}: {}".format(key, bookmark_dict[key]))
 
 
 def main():
@@ -115,14 +139,14 @@ def main():
     # start script
     else:
         # load files
-        bookmarks = load_speeddial(bookmark_path)
         custom_thumbnails = load_thumbs(customThumbs_path)
 
         # create backup
         shutil.copy(topSites_path, backup_path)
-        print("\nCreated backup of 'Top Sites' in '{}'".format(backup_path))
+        shutil.copy(bookmark_path, backup_path)
+        print("\nCreated backup of 'Top Sites' and 'Bookmarks' in '{}'".format(backup_path))
 
-        update_thumbs(topSites_path, bookmarks, custom_thumbnails)
+        update_thumbs(bookmark_path,topSites_path, custom_thumbnails)
 
     input("\nPress 'Enter' to exit.")
     exit()
